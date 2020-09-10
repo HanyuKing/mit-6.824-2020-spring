@@ -105,7 +105,8 @@ type Raft struct {
 	matchIndex []int
 	/****** Volatile state on all leaders (Reinitialized after election)******/
 
-	lastHeartbeat int64 //
+	lastHeartbeat int64 // nano
+	lastVoteTime  int64 // nano
 }
 
 // return currentTerm and whether this server
@@ -195,22 +196,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	reply.Term = rf.currentTerm
 	DPrintf("start RequestVote: server: %d args.Term: %d, rf.votedTerm: %d rf.votedFor: %d, args.CandidateId: %d, args.LastLogIndex: %d, rf.committed: %d", rf.me, args.Term, rf.votedTerm, rf.votedFor, args.CandidateId, args.LastLogIndex, rf.committed)
-	if rf.role == Candidate && args.CandidateId > rf.me {
-		reply.VoteGranted = true
-		return
-	}
 	if args.Term > rf.votedTerm {
 		if args.LastLogIndex >= rf.committed {
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateId
 			rf.votedTerm = args.Term
 			rf.currentTerm = args.Term
+			rf.lastVoteTime = time.Now().UnixNano()
 
 			DPrintf("end RequestVote: server: %d args.Term: %d, rf.votedTerm: %d rf.votedFor: %d, rf.CandidateId: %d", rf.me, args.Term, rf.votedTerm, rf.votedFor, args.CandidateId)
 			return
 		}
 	} else if args.Term == rf.votedTerm {
 		if rf.votedFor == args.CandidateId {
+			rf.lastVoteTime = time.Now().UnixNano()
 			reply.VoteGranted = true
 			DPrintf("end RequestVote: server: %d args.Term: %d, rf.votedTerm: %d rf.votedFor: %d, rf.CandidateId: %d", rf.me, args.Term, rf.votedTerm, rf.votedFor, args.CandidateId)
 			return
@@ -303,9 +302,9 @@ func (rf *Raft) killed() bool {
 }
 
 // return milliseconds
-func (rf *Raft) getCandidateRandomTime() time.Duration {
+func (rf *Raft) getCandidateRandomTime() int {
 	rand.Seed(time.Now().UnixNano())
-	return time.Duration(150 + rand.Intn(150+1))
+	return 150 + rand.Intn(150+1)
 }
 
 type AppendEntryArgs struct {
@@ -342,7 +341,7 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 	if len(args.Entries) == 0 { // a heartbeat
 		reply.Success = true
 
-		rf.lastHeartbeat = time.Now().UnixNano() / 1e6
+		rf.lastHeartbeat = time.Now().UnixNano()
 
 		if args.Term >= rf.currentTerm {
 			if rf.role != Follower {
@@ -408,13 +407,13 @@ func sendHeartbeat(rf *Raft) {
 
 				time.Sleep(20 * time.Millisecond)
 
-				if rf.role == Follower && time.Now().UnixNano()/1e6-rf.lastHeartbeat > 300 {
-					time.Sleep(rf.getCandidateRandomTime() * time.Millisecond)
+				if rf.role == Follower && time.Now().UnixNano()/1e6-rf.lastHeartbeat/1e6 > 300 {
+					time.Sleep(time.Duration(rf.getCandidateRandomTime()) * time.Millisecond)
 					rf.beCandidate()
 				}
 			}
 		}()
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(time.Duration(rf.getHeartbeatTime()) * time.Millisecond)
 	}
 }
 
@@ -455,7 +454,7 @@ func doSendHeartbeat(rf *Raft) {
 		}
 		if shouldStepDown {
 			rf.beFollower()
-			time.Sleep(rf.getCandidateRandomTime() * time.Millisecond)
+			time.Sleep(time.Duration(rf.getCandidateRandomTime()) * time.Millisecond)
 			rf.beCandidate()
 		}
 	}
@@ -463,17 +462,27 @@ func doSendHeartbeat(rf *Raft) {
 }
 
 func (rf *Raft) beCandidate() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	DPrintf("pre can be Candidate: %d, term: %d, lastVoteCost: %d, cost: %d", rf.me, rf.currentTerm, time.Now().UnixNano()/1e6-rf.lastVoteTime/1e6, time.Now().UnixNano()/1e6-rf.lastHeartbeat/1e6)
 	if rf.role != Follower {
 		return
 	}
-	rf.role = Candidate
-	DPrintf("be Candidate: %d, term: %d", rf.me, rf.currentTerm)
 	for {
+		if time.Now().UnixNano()/1e6-rf.lastVoteTime/1e6 < 150 {
+			time.Sleep(time.Duration(rf.getCandidateRandomTime()) * time.Millisecond)
+			continue
+		}
+		DPrintf("can be Candidate: %d, term: %d, rf.lastHeartbeat: %d, cost: %d", rf.me, rf.currentTerm, rf.lastHeartbeat, time.Now().UnixNano()/1e6-rf.lastHeartbeat/1e6)
+		if time.Now().UnixNano()/1e6-rf.lastHeartbeat/1e6 < rf.getHeartbeatTime() {
+			return
+		}
+		rf.role = Candidate
+		DPrintf("be Candidate: %d, term: %d", rf.me, rf.currentTerm)
+
 		rf.votedFor = rf.me
 		rf.currentTerm++
 		rf.votedTerm = rf.currentTerm
+		rf.lastVoteTime = time.Now().UnixNano()
+
 		peerCount := 0
 		agreeCount := 1
 		var mutex sync.Mutex
@@ -525,8 +534,12 @@ func (rf *Raft) beCandidate() {
 			doSendHeartbeat(rf)
 			break
 		}
-		time.Sleep(rf.getCandidateRandomTime() * time.Millisecond)
+		time.Sleep(time.Duration(rf.getCandidateRandomTime()) * time.Millisecond)
 	}
+}
+
+func (rf *Raft) getHeartbeatTime() int64 {
+	return 75
 }
 
 func (rf *Raft) beFollower() {
