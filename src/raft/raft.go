@@ -399,20 +399,21 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 func sendHeartbeat(rf *Raft) {
+
+	go func() {
+		for {
+
+			time.Sleep(150 * time.Millisecond)
+
+			if rf.role == Follower && time.Now().UnixNano()/1e6-rf.lastHeartbeat/1e6 > 300 {
+				time.Sleep(time.Duration(rf.getCandidateRandomTime()) * time.Millisecond)
+				rf.beCandidate()
+			}
+		}
+	}()
+
 	for {
 		go doSendHeartbeat(rf)
-
-		go func() {
-			for {
-
-				time.Sleep(20 * time.Millisecond)
-
-				if rf.role == Follower && time.Now().UnixNano()/1e6-rf.lastHeartbeat/1e6 > 300 {
-					time.Sleep(time.Duration(rf.getCandidateRandomTime()) * time.Millisecond)
-					rf.beCandidate()
-				}
-			}
-		}()
 		time.Sleep(time.Duration(rf.getHeartbeatTime()) * time.Millisecond)
 	}
 }
@@ -462,7 +463,6 @@ func doSendHeartbeat(rf *Raft) {
 }
 
 func (rf *Raft) beCandidate() {
-	DPrintf("pre can be Candidate: %d, term: %d, lastVoteCost: %d, cost: %d", rf.me, rf.currentTerm, time.Now().UnixNano()/1e6-rf.lastVoteTime/1e6, time.Now().UnixNano()/1e6-rf.lastHeartbeat/1e6)
 	if rf.role != Follower {
 		return
 	}
@@ -471,17 +471,17 @@ func (rf *Raft) beCandidate() {
 			time.Sleep(time.Duration(rf.getCandidateRandomTime()) * time.Millisecond)
 			continue
 		}
-		DPrintf("can be Candidate: %d, term: %d, rf.lastHeartbeat: %d, cost: %d", rf.me, rf.currentTerm, rf.lastHeartbeat, time.Now().UnixNano()/1e6-rf.lastHeartbeat/1e6)
+		DPrintf("now: %d, can be Candidate: %d, term: %d, rf.lastHeartbeat: %d, cost: %d", time.Now().UnixNano()/1e6, rf.me, rf.currentTerm, rf.lastHeartbeat, time.Now().UnixNano()/1e6-rf.lastHeartbeat/1e6)
 		if time.Now().UnixNano()/1e6-rf.lastHeartbeat/1e6 < rf.getHeartbeatTime() {
 			return
 		}
 		rf.role = Candidate
-		DPrintf("be Candidate: %d, term: %d", rf.me, rf.currentTerm)
+		DPrintf("now: %d, be Candidate: %d, term: %d", time.Now().UnixNano()/1e6, rf.me, rf.currentTerm)
 
 		rf.votedFor = rf.me
 		rf.currentTerm++
 		rf.votedTerm = rf.currentTerm
-		rf.lastVoteTime = time.Now().UnixNano()
+		//rf.lastVoteTime = time.Now().UnixNano()
 
 		peerCount := 0
 		agreeCount := 1
