@@ -1,1 +1,1 @@
-# 6.824 (2020 Spring)
+# MIT 6.824 Distributed Systems (Spring 2020)
