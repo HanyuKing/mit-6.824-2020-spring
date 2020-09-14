@@ -55,6 +55,11 @@ const (
 	Follower  Role = 3
 )
 
+type Log struct {
+	Term    int
+	Command interface{}
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -79,7 +84,7 @@ type Raft struct {
 		log entries; each entry contains command for state machine,
 		and term when entry was received by leader (first index is 1)
 	*/
-	log []interface{}
+	log []Log
 
 	/****** Persistent State ******/
 
@@ -107,6 +112,7 @@ type Raft struct {
 
 	lastHeartbeat int64 // nano
 	lastVoteTime  int64 // nano
+	applyCh       chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -256,6 +262,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntryArgs, reply *AppendEntryReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -271,13 +282,52 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+	index := rf.committed
+	term := rf.currentTerm
+	isLeader := rf.role == Leader
 
 	// Your code here (2B).
-
-	return index, term, isLeader
+	if !isLeader {
+		return index, term, false
+	}
+	var prevLogIndex int
+	var prevLogTerm int
+	if rf.commitIndex == 1 {
+		prevLogIndex = 0
+		prevLogTerm = 0
+	} else {
+		prevLogIndex = rf.commitIndex - 1
+		prevLogTerm = rf.log[rf.commitIndex-1].Term
+	}
+	rf.log = append(rf.log, Log{
+		Term:    rf.currentTerm,
+		Command: command,
+	})
+	for i, _ := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		var reply AppendEntryReply
+		rf.sendAppendEntries(i, &AppendEntryArgs{
+			Term:         rf.currentTerm,
+			LeaderIndex:  rf.me,
+			PrevLogIndex: prevLogIndex,
+			PrevLogTerm:  prevLogTerm,
+			Entries: []Log{{
+				Term:    rf.currentTerm,
+				Command: command,
+			}},
+			LeaderCommit: rf.commitIndex,
+		}, &reply)
+	}
+	rf.committed = rf.commitIndex
+	rf.commitIndex = rf.commitIndex + 1
+	rf.applyCh <- ApplyMsg{
+		CommandValid: true,
+		Command:      command,
+		CommandIndex: rf.committed,
+	}
+	return rf.committed, term, isLeader
 }
 
 //
@@ -308,12 +358,12 @@ func (rf *Raft) getCandidateRandomTime() int {
 }
 
 type AppendEntryArgs struct {
-	Term         int           // leader’s term
-	LeaderIndex  int           // so follower can redirect clients
-	PrevLogIndex int           // index of log entry immediately preceding new ones
-	PrevLogTerm  int           // term of prevLogIndex entry
-	Entries      []interface{} //log entries to store (empty for heartbeat; may send more than one for efficiency)
-	LeaderCommit int           // leader’s commitIndex
+	Term         int   // leader’s term
+	LeaderIndex  int   // so follower can redirect clients
+	PrevLogIndex int   // index of log entry immediately preceding new ones
+	PrevLogTerm  int   // term of prevLogIndex entry
+	Entries      []Log //log entries to store (empty for heartbeat; may send more than one for efficiency)
+	LeaderCommit int   // leader’s commitIndex
 }
 
 type AppendEntryReply struct {
@@ -351,13 +401,33 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 
 		rf.currentTerm = args.Term
 		return
+	} else { // save command
+		if args.Term < rf.currentTerm {
+			reply.Success = false
+			return
+		}
+		if args.PrevLogIndex > 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+			reply.Success = false
+			return
+		}
+		rf.log = append(rf.log, args.Entries...)
+		for i, entry := range args.Entries {
+			rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				Command:      entry.Command,
+				CommandIndex: args.PrevLogIndex + 1 + i,
+			}
+		}
+		rf.committed = args.PrevLogIndex + 1 + len(args.Entries)
 	}
+}
 
-	//if len(rf.log) >= 2 && len(rf.log) -1 -1 < args.PrevLogIndex {
-	//	reply.Success = false
-	//	return
-	//}
-
+func min(a, b int) int {
+	if a > b {
+		return b
+	} else {
+		return a
+	}
 }
 
 //
@@ -378,10 +448,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.votedFor = -1
+	rf.applyCh = applyCh
 
-	rf.log = append(rf.log, struct{}{})
+	rf.log = append(rf.log, Log{})
 	rf.commitIndex = 1
-	rf.committed = 1
+	rf.committed = 0
 
 	// Your initialization code here (2A, 2B, 2C).
 
